@@ -239,10 +239,6 @@ struct VTableSlot {
 
 } // end anonymous namespace
 
-static VTableSlot makeVTableSlot(Metadata *TypeID, uint64_t ByteOffset) {
-  return VTableSlot{TypeID, ByteOffset};
-}
-
 namespace llvm {
 
 template <> struct DenseMapInfo<VTableSlot> {
@@ -1019,8 +1015,8 @@ void DevirtModule::scanTypeTestUsers(Function *TypeTestFunc,
       Value *Ptr = CI->getArgOperand(0)->stripPointerCasts();
       if (SeenPtrs.insert(Ptr).second) {
         for (DevirtCallSite Call : DevirtCalls) {
-          CallSlots[makeVTableSlot(TypeId, Call.Offset)].addCallSite(
-              CI->getArgOperand(0), Call.CS, nullptr);
+          CallSlots[{TypeId, Call.Offset}].addCallSite(CI->getArgOperand(0),
+                                                       Call.CS, nullptr);
         }
       }
     }
@@ -1106,8 +1102,8 @@ void DevirtModule::scanTypeCheckedLoadUsers(Function *TypeCheckedLoadFunc) {
     if (HasNonCallUses)
       ++NumUnsafeUses;
     for (DevirtCallSite Call : DevirtCalls) {
-      CallSlots[makeVTableSlot(TypeId, Call.Offset)].addCallSite(
-          Ptr, Call.CS, &NumUnsafeUses);
+      CallSlots[{TypeId, Call.Offset}].addCallSite(Ptr, Call.CS,
+                                                   &NumUnsafeUses);
     }
 
     CI->eraseFromParent();
@@ -1217,22 +1213,21 @@ bool DevirtModule::run() {
         // FIXME: Only add live functions.
         for (FunctionSummary::VFuncId VF : FS->type_test_assume_vcalls())
           for (Metadata *MD : MetadataByGUID[VF.GUID])
-            CallSlots[makeVTableSlot(MD, VF.Offset)]
-                .CSInfo.SummaryHasTypeTestAssumeUsers = true;
+            CallSlots[{MD, VF.Offset}].CSInfo.SummaryHasTypeTestAssumeUsers =
+                true;
         for (FunctionSummary::VFuncId VF : FS->type_checked_load_vcalls())
           for (Metadata *MD : MetadataByGUID[VF.GUID])
-            CallSlots[makeVTableSlot(MD, VF.Offset)]
+            CallSlots[{MD, VF.Offset}]
                 .CSInfo.SummaryTypeCheckedLoadUsers.push_back(FS);
         for (const FunctionSummary::ConstVCall &VC :
              FS->type_test_assume_const_vcalls())
           for (Metadata *MD : MetadataByGUID[VC.VFunc.GUID])
-            CallSlots[makeVTableSlot(MD, VC.VFunc.Offset)]
-                .ConstCSInfo[VC.Args]
-                .SummaryHasTypeTestAssumeUsers = true;
+            CallSlots[{MD, VC.VFunc.Offset}]
+                .ConstCSInfo[VC.Args].SummaryHasTypeTestAssumeUsers = true;
         for (const FunctionSummary::ConstVCall &VC :
              FS->type_checked_load_const_vcalls())
           for (Metadata *MD : MetadataByGUID[VC.VFunc.GUID])
-            CallSlots[makeVTableSlot(MD, VC.VFunc.Offset)]
+            CallSlots[{MD, VC.VFunc.Offset}]
                 .ConstCSInfo[VC.Args]
                 .SummaryTypeCheckedLoadUsers.push_back(FS);
       }
