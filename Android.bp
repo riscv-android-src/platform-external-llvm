@@ -2,6 +2,10 @@ cc_defaults {
     name: "llvm-defaults",
     defaults: ["llvm-defaults-no-generated-headers"],
     header_libs: ["llvm-headers"],
+    tidy_checks: [
+        "-google-build-*",
+        "-google-global-*",
+    ],
 }
 
 // This module defines all of the defaults used to compiled llvm, except for
@@ -11,7 +15,6 @@ llvm_defaults {
     name: "llvm-defaults-no-generated-headers",
 
     host_supported: true,
-    clang: true,
 
     cflags: [
         "-D_GNU_SOURCE",
@@ -35,6 +38,17 @@ llvm_defaults {
         "-std=c++11",
     ],
 
+    clang_cflags: [
+        // Temporarily suppress the warnings http://b/37867503
+        "-Wno-error=unused-lambda-capture",
+        "-Wno-error=user-defined-warnings",
+    ],
+
+    tidy_checks: [
+        "-google-build-*",
+        "-google-global-*",
+    ],
+
     header_libs: ["llvm-headers-no-generated-headers"],
 
     target: {
@@ -42,6 +56,8 @@ llvm_defaults {
             cflags: [
                 "-finline-functions",
             ],
+        },
+        linux: {
             cppflags: [
                 "-Woverloaded-virtual",
             ],
@@ -64,12 +80,9 @@ llvm_defaults {
 
             host_ldlibs: ["-luuid"],
         },
-        linux: {
-            cppflags: ["-Woverloaded-virtual"],
-
+        linux_glibc: {
             // Add on ncurses to have support for terminfo
             host_ldlibs: [
-                "-ldl",
                 "-lncurses",
                 "-lgcc_s",
             ],
@@ -82,7 +95,6 @@ llvm_defaults {
 
             // Add on ncurses to have support for terminfo
             host_ldlibs: [
-                "-ldl",
                 "-lncurses",
             ],
         },
@@ -91,6 +103,7 @@ llvm_defaults {
 
 cc_library_headers {
     name: "llvm-headers-no-generated-headers",
+    vendor_available: true,
     host_supported: true,
     export_include_dirs: ["include"],
     target: {
@@ -100,6 +113,9 @@ cc_library_headers {
         host: {
             export_include_dirs: ["host/include"],
         },
+        linux_bionic: {
+            enabled: true,
+        },
         windows: {
             enabled: true,
         },
@@ -108,6 +124,7 @@ cc_library_headers {
 
 cc_library_headers {
     name: "llvm-headers",
+    vendor_available: true,
     host_supported: true,
     header_libs: ["llvm-headers-no-generated-headers"],
     export_header_lib_headers: ["llvm-headers-no-generated-headers"],
@@ -184,9 +201,9 @@ llvm_aarch64_static_libraries = [
     "libLLVMAArch64Disassembler",
 ]
 
-cc_library_shared {
+cc_defaults {
     host_supported: true,
-    name: "libLLVM",
+    name: "libLLVM-defaults",
     defaults: [
         "llvm-defaults",
         "force_build_llvm_components",
@@ -229,6 +246,10 @@ cc_library_shared {
         "libLLVMProfileData",
         "libLLVMProfileDataCoverage",
         "libLLVMLibDriver",
+        "libLLVMExecutionEngine",
+        "libLLVMRuntimeDyld",
+        "libLLVMMCJIT",
+        "libLLVMOrcJIT",
     ],
 
     export_include_dirs: ["include"],
@@ -236,12 +257,7 @@ cc_library_shared {
     target: {
         host: {
             // Host build pulls in all ARM, Mips, X86 components.
-           whole_static_libs: [
-                "libLLVMExecutionEngine",
-                "libLLVMRuntimeDyld",
-                "libLLVMMCJIT",
-                "libLLVMOrcJIT",
-            ] + llvm_arm_static_libraries +
+           whole_static_libs: llvm_arm_static_libraries +
                 llvm_aarch64_static_libraries +
                 llvm_mips_static_libraries +
                 llvm_x86_static_libraries,
@@ -254,18 +270,6 @@ cc_library_shared {
                 "-lpsapi",
                 "-lole32",
                 "-lversion",
-            ],
-        },
-        darwin: {
-            host_ldlibs: [
-                "-ldl",
-                "-lpthread",
-            ],
-        },
-        linux: {
-            host_ldlibs: [
-                "-ldl",
-                "-lpthread",
             ],
         },
         android: {
@@ -295,6 +299,16 @@ cc_library_shared {
                 llvm_arm_static_libraries,
         },
     },
+}
+
+cc_library_shared {
+    name: "libLLVM",
+    defaults: ["libLLVM-defaults"],
+}
+
+cc_library_shared {
+    name: "libLLVM_android",
+    defaults: ["libLLVM-defaults"],
 }
 
 subdirs = [
