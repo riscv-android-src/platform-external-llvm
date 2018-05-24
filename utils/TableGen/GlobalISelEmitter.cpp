@@ -673,7 +673,7 @@ public:
   /// finalize() and optimize() are both allowed to mutate the contained
   /// matchers, so moving them out after finalize() is not supported.
   void finalize();
-  void optimize() override {}
+  void optimize() override;
   void emit(MatchTable &Table) override;
 
   /// Could be used to move out the matchers added previously, unless finalize()
@@ -703,6 +703,60 @@ private:
   /// See if a candidate matcher could be added to this group solely by
   /// analyzing its first condition.
   bool candidateConditionMatches(const PredicateMatcher &Predicate) const;
+};
+
+class SwitchMatcher : public Matcher {
+  /// All the nested matchers, representing distinct switch-cases. The first
+  /// conditions (as Matcher::getFirstCondition() reports) of all the nested
+  /// matchers must share the same type and path to a value they check, in other
+  /// words, be isIdenticalDownToValue, but have different values they check
+  /// against.
+  std::vector<Matcher *> Matchers;
+
+  /// The representative condition, with a type and a path (InsnVarID and OpIdx
+  /// in most cases)  shared by all the matchers contained.
+  std::unique_ptr<PredicateMatcher> Condition = nullptr;
+
+  /// Temporary set used to check that the case values don't repeat within the
+  /// same switch.
+  std::set<MatchTableRecord> Values;
+
+  /// An owning collection for any auxiliary matchers created while optimizing
+  /// nested matchers contained.
+  std::vector<std::unique_ptr<Matcher>> MatcherStorage;
+
+public:
+  bool addMatcher(Matcher &Candidate);
+
+  void finalize();
+  void emit(MatchTable &Table) override;
+
+  iterator_range<std::vector<Matcher *>::iterator> matchers() {
+    return make_range(Matchers.begin(), Matchers.end());
+  }
+  size_t size() const { return Matchers.size(); }
+  bool empty() const { return Matchers.empty(); }
+
+  std::unique_ptr<PredicateMatcher> popFirstCondition() override {
+    // SwitchMatcher doesn't have a common first condition for its cases, as all
+    // the cases only share a kind of a value (a type and a path to it) they
+    // match, but deliberately differ in the actual value they match.
+    llvm_unreachable("Trying to pop a condition from a condition-less group");
+  }
+  const PredicateMatcher &getFirstCondition() const override {
+    llvm_unreachable("Trying to pop a condition from a condition-less group");
+  }
+  bool hasFirstCondition() const override { return false; }
+
+private:
+  /// See if the predicate type has a Switch-implementation for it.
+  static bool isSupportedPredicateType(const PredicateMatcher &Predicate);
+
+  bool candidateConditionMatches(const PredicateMatcher &Predicate) const;
+
+  /// emit()-helper
+  static void emitPredicateSpecificOpcodes(const PredicateMatcher &P,
+                                           MatchTable &Table);
 };
 
 /// Generates code to check that a match rule matches.
@@ -1998,6 +2052,14 @@ void InstructionMatcher::optimize() {
       Stash.emplace_back(
           new InstructionNumOperandsMatcher(InsnVarID, getNumOperands()));
     NumOperandsCheck = false;
+
+    for (auto &OM : Operands)
+      for (auto &OP : OM->predicates())
+        if (isa<IntrinsicIDOperandMatcher>(OP)) {
+          Stash.push_back(std::move(OP));
+          OM->eraseNullPredicates();
+          break;
+        }
   }
 
   if (InsnVarID > 0) {
@@ -2005,6 +2067,12 @@ void InstructionMatcher::optimize() {
     for (auto &OP : Operands[0]->predicates())
       OP.reset();
     Operands[0]->eraseNullPredicates();
+  }
+  for (auto &OM : Operands) {
+    for (auto &OP : OM->predicates())
+      if (isa<LLTOperandMatcher>(OP))
+        Stash.push_back(std::move(OP));
+    OM->eraseNullPredicates();
   }
   while (!Stash.empty())
     prependPredicate(Stash.pop_back_val());
@@ -4012,7 +4080,7 @@ std::vector<Matcher *> GlobalISelEmitter::optimizeRules(
   }
   ProcessCurrentGroup();
 
-  DEBUG(dbgs() << "NumGroups: " << NumGroups << "\n");
+  LLVM_DEBUG(dbgs() << "NumGroups: " << NumGroups << "\n");
   assert(CurrentGroup->empty() && "The last group wasn't properly processed");
   return OptRules;
 }
@@ -4027,6 +4095,25 @@ GlobalISelEmitter::buildMatchTable(MutableArrayRef<RuleMatcher> Rules,
   if (!Optimize)
     return MatchTable::buildTable(InputRules, WithCoverage);
 
+  unsigned CurrentOrdering = 0;
+  StringMap<unsigned> OpcodeOrder;
+  for (RuleMatcher &Rule : Rules) {
+    const StringRef Opcode = Rule.getOpcode();
+    assert(!Opcode.empty() && "Didn't expect an undefined opcode");
+    if (OpcodeOrder.count(Opcode) == 0)
+      OpcodeOrder[Opcode] = CurrentOrdering++;
+  }
+
+  std::stable_sort(InputRules.begin(), InputRules.end(),
+                   [&OpcodeOrder](const Matcher *A, const Matcher *B) {
+                     auto *L = static_cast<const RuleMatcher *>(A);
+                     auto *R = static_cast<const RuleMatcher *>(B);
+                     return std::make_tuple(OpcodeOrder[L->getOpcode()],
+                                            L->getNumOperands()) <
+                            std::make_tuple(OpcodeOrder[R->getOpcode()],
+                                            R->getNumOperands());
+                   });
+
   for (Matcher *Rule : InputRules)
     Rule->optimize();
 
@@ -4037,7 +4124,37 @@ GlobalISelEmitter::buildMatchTable(MutableArrayRef<RuleMatcher> Rules,
   for (Matcher *Rule : OptRules)
     Rule->optimize();
 
+  OptRules = optimizeRules<SwitchMatcher>(OptRules, MatcherStorage);
+
   return MatchTable::buildTable(OptRules, WithCoverage);
+}
+
+void GroupMatcher::optimize() {
+  // Make sure we only sort by a specific predicate within a range of rules that
+  // all have that predicate checked against a specific value (not a wildcard):
+  auto F = Matchers.begin();
+  auto T = F;
+  auto E = Matchers.end();
+  while (T != E) {
+    while (T != E) {
+      auto *R = static_cast<RuleMatcher *>(*T);
+      if (!R->getFirstConditionAsRootType().get().isValid())
+        break;
+      ++T;
+    }
+    std::stable_sort(F, T, [](Matcher *A, Matcher *B) {
+      auto *L = static_cast<RuleMatcher *>(A);
+      auto *R = static_cast<RuleMatcher *>(B);
+      return L->getFirstConditionAsRootType() <
+             R->getFirstConditionAsRootType();
+    });
+    if (T != E)
+      F = ++T;
+  }
+  GlobalISelEmitter::optimizeRules<GroupMatcher>(Matchers, MatcherStorage)
+      .swap(Matchers);
+  GlobalISelEmitter::optimizeRules<SwitchMatcher>(Matchers, MatcherStorage)
+      .swap(Matchers);
 }
 
 void GlobalISelEmitter::run(raw_ostream &OS) {
@@ -4375,17 +4492,14 @@ void RuleMatcher::optimize() {
   for (auto &Item : InsnVariableIDs) {
     InstructionMatcher &InsnMatcher = *Item.first;
     for (auto &OM : InsnMatcher.operands()) {
-      // Register Banks checks rarely fail, but often crash as targets usually
-      // provide only partially defined RegisterBankInfo::getRegBankFromRegClass
-      // method. Often the problem is hidden as non-optimized MatchTable checks
-      // banks rather late, most notably after checking target / function /
-      // module features and a few opcodes. That makes these checks a)
-      // beneficial to delay until the very end (we don't want to perform a lot
-      // of checks that all pass and then fail at the very end) b) not safe to
-      // have as early checks.
+      // Complex Patterns are usually expensive and they relatively rarely fail
+      // on their own: more often we end up throwing away all the work done by a
+      // matching part of a complex pattern because some other part of the
+      // enclosing pattern didn't match. All of this makes it beneficial to
+      // delay complex patterns until the very end of the rule matching,
+      // especially for targets having lots of complex patterns.
       for (auto &OP : OM->predicates())
-        if (isa<RegisterBankOperandMatcher>(OP) ||
-            isa<ComplexPatternOperandMatcher>(OP))
+        if (isa<ComplexPatternOperandMatcher>(OP))
           EpilogueMatchers.emplace_back(std::move(OP));
       OM->eraseNullPredicates();
     }
@@ -4491,10 +4605,20 @@ void GroupMatcher::finalize() {
     return;
 
   Matcher &FirstRule = **Matchers.begin();
+  for (;;) {
+    // All the checks are expected to succeed during the first iteration:
+    for (const auto &Rule : Matchers)
+      if (!Rule->hasFirstCondition())
+        return;
+    const auto &FirstCondition = FirstRule.getFirstCondition();
+    for (unsigned I = 1, E = Matchers.size(); I < E; ++I)
+      if (!Matchers[I]->getFirstCondition().isIdentical(FirstCondition))
+        return;
 
-  Conditions.push_back(FirstRule.popFirstCondition());
-  for (unsigned I = 1, E = Matchers.size(); I < E; ++I)
-    Matchers[I]->popFirstCondition();
+    Conditions.push_back(FirstRule.popFirstCondition());
+    for (unsigned I = 1, E = Matchers.size(); I < E; ++I)
+      Matchers[I]->popFirstCondition();
+  }
 }
 
 void GroupMatcher::emit(MatchTable &Table) {
@@ -4516,6 +4640,135 @@ void GroupMatcher::emit(MatchTable &Table) {
   if (!Conditions.empty())
     Table << MatchTable::Opcode("GIM_Reject", -1) << MatchTable::LineBreak
           << MatchTable::Label(LabelID);
+}
+
+bool SwitchMatcher::isSupportedPredicateType(const PredicateMatcher &P) {
+  return isa<InstructionOpcodeMatcher>(P) || isa<LLTOperandMatcher>(P);
+}
+
+bool SwitchMatcher::candidateConditionMatches(
+    const PredicateMatcher &Predicate) const {
+
+  if (empty()) {
+    // Sharing predicates for nested instructions is not supported yet as we
+    // currently don't hoist the GIM_RecordInsn's properly, therefore we can
+    // only work on the original root instruction (InsnVarID == 0):
+    if (Predicate.getInsnVarID() != 0)
+      return false;
+    // ... while an attempt to add even a root matcher to an empty SwitchMatcher
+    // could fail as not all the types of conditions are supported:
+    if (!isSupportedPredicateType(Predicate))
+      return false;
+    // ... or the condition might not have a proper implementation of
+    // getValue() / isIdenticalDownToValue() yet:
+    if (!Predicate.hasValue())
+      return false;
+    // ... otherwise an empty Switch can accomodate the condition with no
+    // further requirements:
+    return true;
+  }
+
+  const Matcher &CaseRepresentative = **Matchers.begin();
+  const auto &RepresentativeCondition = CaseRepresentative.getFirstCondition();
+  // Switch-cases must share the same kind of condition and path to the value it
+  // checks:
+  if (!Predicate.isIdenticalDownToValue(RepresentativeCondition))
+    return false;
+
+  const auto Value = Predicate.getValue();
+  // ... but be unique with respect to the actual value they check:
+  return Values.count(Value) == 0;
+}
+
+bool SwitchMatcher::addMatcher(Matcher &Candidate) {
+  if (!Candidate.hasFirstCondition())
+    return false;
+
+  const PredicateMatcher &Predicate = Candidate.getFirstCondition();
+  if (!candidateConditionMatches(Predicate))
+    return false;
+  const auto Value = Predicate.getValue();
+  Values.insert(Value);
+
+  Matchers.push_back(&Candidate);
+  return true;
+}
+
+void SwitchMatcher::finalize() {
+  assert(Condition == nullptr && "Already finalized");
+  assert(Values.size() == Matchers.size() && "Broken SwitchMatcher");
+  if (empty())
+    return;
+
+  std::stable_sort(Matchers.begin(), Matchers.end(),
+                   [](const Matcher *L, const Matcher *R) {
+                     return L->getFirstCondition().getValue() <
+                            R->getFirstCondition().getValue();
+                   });
+  Condition = Matchers[0]->popFirstCondition();
+  for (unsigned I = 1, E = Values.size(); I < E; ++I)
+    Matchers[I]->popFirstCondition();
+}
+
+void SwitchMatcher::emitPredicateSpecificOpcodes(const PredicateMatcher &P,
+                                                 MatchTable &Table) {
+  assert(isSupportedPredicateType(P) && "Predicate type is not supported");
+
+  if (const auto *Condition = dyn_cast<InstructionOpcodeMatcher>(&P)) {
+    Table << MatchTable::Opcode("GIM_SwitchOpcode") << MatchTable::Comment("MI")
+          << MatchTable::IntValue(Condition->getInsnVarID());
+    return;
+  }
+  if (const auto *Condition = dyn_cast<LLTOperandMatcher>(&P)) {
+    Table << MatchTable::Opcode("GIM_SwitchType") << MatchTable::Comment("MI")
+          << MatchTable::IntValue(Condition->getInsnVarID())
+          << MatchTable::Comment("Op")
+          << MatchTable::IntValue(Condition->getOpIdx());
+    return;
+  }
+
+  llvm_unreachable("emitPredicateSpecificOpcodes is broken: can not handle a "
+                   "predicate type that is claimed to be supported");
+}
+
+void SwitchMatcher::emit(MatchTable &Table) {
+  assert(Values.size() == Matchers.size() && "Broken SwitchMatcher");
+  if (empty())
+    return;
+  assert(Condition != nullptr &&
+         "Broken SwitchMatcher, hasn't been finalized?");
+
+  std::vector<unsigned> LabelIDs(Values.size());
+  std::generate(LabelIDs.begin(), LabelIDs.end(),
+                [&Table]() { return Table.allocateLabelID(); });
+  const unsigned Default = Table.allocateLabelID();
+
+  const int64_t LowerBound = Values.begin()->getRawValue();
+  const int64_t UpperBound = Values.rbegin()->getRawValue() + 1;
+
+  emitPredicateSpecificOpcodes(*Condition, Table);
+
+  Table << MatchTable::Comment("[") << MatchTable::IntValue(LowerBound)
+        << MatchTable::IntValue(UpperBound) << MatchTable::Comment(")")
+        << MatchTable::Comment("default:") << MatchTable::JumpTarget(Default);
+
+  int64_t J = LowerBound;
+  auto VI = Values.begin();
+  for (unsigned I = 0, E = Values.size(); I < E; ++I) {
+    auto V = *VI++;
+    while (J++ < V.getRawValue())
+      Table << MatchTable::IntValue(0);
+    V.turnIntoComment();
+    Table << MatchTable::LineBreak << V << MatchTable::JumpTarget(LabelIDs[I]);
+  }
+  Table << MatchTable::LineBreak;
+
+  for (unsigned I = 0, E = Values.size(); I < E; ++I) {
+    Table << MatchTable::Label(LabelIDs[I]);
+    Matchers[I]->emit(Table);
+    Table << MatchTable::Opcode("GIM_Reject") << MatchTable::LineBreak;
+  }
+  Table << MatchTable::Label(Default);
 }
 
 unsigned OperandMatcher::getInsnVarID() const { return Insn.getInsnVarID(); }

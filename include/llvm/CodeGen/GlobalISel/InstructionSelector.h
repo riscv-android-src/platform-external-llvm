@@ -81,6 +81,23 @@ enum {
   ///        failed match.
   GIM_Try,
 
+  /// Switch over the opcode on the specified instruction
+  /// - InsnID - Instruction ID
+  /// - LowerBound - numerically minimum opcode supported
+  /// - UpperBound - numerically maximum + 1 opcode supported
+  /// - Default - failure jump target
+  /// - JumpTable... - (UpperBound - LowerBound) (at least 2) jump targets
+  GIM_SwitchOpcode,
+
+  /// Switch over the LLT on the specified instruction operand
+  /// - InsnID - Instruction ID
+  /// - OpIdx - Operand index
+  /// - LowerBound - numerically minimum Type ID supported
+  /// - UpperBound - numerically maximum + 1 Type ID supported
+  /// - Default - failure jump target
+  /// - JumpTable... - (UpperBound - LowerBound) (at least 2) jump targets
+  GIM_SwitchType,
+
   /// Record the specified instruction
   /// - NewInsnID - Instruction ID to define
   /// - InsnID - Instruction ID
@@ -363,11 +380,16 @@ public:
           FeatureBitsets(FeatureBitsets),
           ComplexPredicates(ComplexPredicates),
           CustomRenderers(CustomRenderers) {
+
+      for (size_t I = 0; I < NumTypeObjects; ++I)
+        TypeIDMap[TypeObjects[I]] = I;
     }
     const LLT *TypeObjects;
     const PredicateBitset *FeatureBitsets;
     const ComplexMatcherMemFn *ComplexPredicates;
     const CustomRendererFn *CustomRenderers;
+
+    SmallDenseMap<LLT, unsigned, 64> TypeIDMap;
   };
 
 protected:

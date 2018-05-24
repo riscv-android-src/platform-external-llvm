@@ -1078,6 +1078,12 @@ static void computeKnownBitsFromOperator(const Operator *I, KnownBits &Known,
       // leading zero bits.
       MaxHighZeros =
           std::max(Known.countMinLeadingZeros(), Known2.countMinLeadingZeros());
+    } else if (SPF == SPF_ABS) {
+      // RHS from matchSelectPattern returns the negation part of abs pattern.
+      // If the negate has an NSW flag we can assume the sign bit of the result
+      // will be 0 because that makes abs(INT_MIN) undefined.
+      if (cast<Instruction>(RHS)->hasNoSignedWrap())
+        MaxHighZeros = 1;
     }
 
     // Only known if known in both the LHS and RHS.
@@ -1956,8 +1962,8 @@ bool isKnownNonZero(const Value *V, unsigned Depth, const Query &Q) {
     if (auto CS = ImmutableCallSite(V)) {
       if (CS.isReturnNonNull())
         return true;
-      if (CS.getIntrinsicID() == Intrinsic::ID::launder_invariant_group)
-        return isKnownNonZero(CS->getOperand(0), Depth + 1, Q);
+      if (const auto *RP = getArgumentAliasingToReturnedPointer(CS))
+        return isKnownNonZero(RP, Depth + 1, Q);
     }
   }
 
@@ -3372,45 +3378,33 @@ static uint64_t GetStringLengthH(const Value *V,
   return NullIndex + 1;
 }
 
-static bool isStringFromCalloc(const Value *Str, const TargetLibraryInfo *TLI) {
-  const CallInst *Calloc = dyn_cast<CallInst>(Str);
-  if (!Calloc)
-    return false;
-
-  const Function *InnerCallee = Calloc->getCalledFunction();
-  if (!InnerCallee)
-    return false;
-
-  LibFunc Func;
-  if (!TLI->getLibFunc(*InnerCallee, Func) || !TLI->has(Func) ||
-      Func != LibFunc_calloc)
-    return false;
-
-  const ConstantInt *N = dyn_cast<ConstantInt>(Calloc->getOperand(0));
-  const ConstantInt *Size = dyn_cast<ConstantInt>(Calloc->getOperand(1));
-
-  if (!N || !Size)
-    return false;
-
-  if (N->isNullValue() || Size->isNullValue())
-    return false;
-
-  return true;
-}
-
 /// If we can compute the length of the string pointed to by
 /// the specified pointer, return 'len+1'.  If we can't, return 0.
-uint64_t llvm::GetStringLength(const Value *V, const TargetLibraryInfo *TLI, unsigned CharSize) {
+uint64_t llvm::GetStringLength(const Value *V, unsigned CharSize) {
   if (!V->getType()->isPointerTy())
     return 0;
-  if (isStringFromCalloc(V, TLI))
-    return 1;
 
   SmallPtrSet<const PHINode*, 32> PHIs;
   uint64_t Len = GetStringLengthH(V, PHIs, CharSize);
   // If Len is ~0ULL, we had an infinite phi cycle: this is dead code, so return
   // an empty string as a length.
   return Len == ~0ULL ? 1 : Len;
+}
+
+const Value *llvm::getArgumentAliasingToReturnedPointer(ImmutableCallSite CS) {
+  assert(CS &&
+         "getArgumentAliasingToReturnedPointer only works on nonnull CallSite");
+  if (const Value *RV = CS.getReturnedArgOperand())
+    return RV;
+  // This can be used only as a aliasing property.
+  if (isIntrinsicReturningPointerAliasingArgumentWithoutCapturing(CS))
+    return CS.getArgOperand(0);
+  return nullptr;
+}
+
+bool llvm::isIntrinsicReturningPointerAliasingArgumentWithoutCapturing(
+      ImmutableCallSite CS) {
+  return CS.getIntrinsicID() == Intrinsic::launder_invariant_group;
 }
 
 /// \p PN defines a loop-variant pointer to an object.  Check if the
@@ -3458,11 +3452,19 @@ Value *llvm::GetUnderlyingObject(Value *V, const DataLayout &DL,
       // An alloca can't be further simplified.
       return V;
     } else {
-      if (auto CS = CallSite(V))
-        if (Value *RV = CS.getReturnedArgOperand()) {
-          V = RV;
+      if (auto CS = CallSite(V)) {
+        // Note: getArgumentAliasingToReturnedPointer keeps it in sync with
+        // CaptureTracking, which is needed for correctness.  This is because
+        // some intrinsics like launder.invariant.group returns pointers that
+        // are aliasing it's argument, which is known to CaptureTracking.
+        // If AliasAnalysis does not use the same information, it could assume
+        // that pointer returned from launder does not alias it's argument
+        // because launder could not return it if the pointer was not captured.
+        if (auto *RP = getArgumentAliasingToReturnedPointer(CS)) {
+          V = RP;
           continue;
         }
+      }
 
       // See if InstructionSimplify knows any relevant tricks.
       if (Instruction *I = dyn_cast<Instruction>(V))
