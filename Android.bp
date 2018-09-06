@@ -29,6 +29,7 @@ llvm_defaults {
         "-Wno-unused-parameter",
         "-Wno-maybe-uninitialized",
         "-Wno-missing-field-initializers",
+        "-Wno-implicit-fallthrough",
         "-Wwrite-strings",
         "-Werror",
         "-Dsprintf=sprintf",
