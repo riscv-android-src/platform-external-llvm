@@ -18,6 +18,5 @@ genrule {
     name: "llvm-gen-config",
     srcs: ["BuildVariables.inc.in"],
     out: ["BuildVariables.inc"],
-    tool_files: ["BuildVariables.inc.in"],
     cmd: "sed -e \"s#@ANDROID_BUILD_TOP@#$$PWD#\" < $(in) > $(out)",
 }
