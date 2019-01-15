@@ -6,6 +6,9 @@ cc_defaults {
         "-google-build-*",
         "-google-global-*",
     ],
+    sanitize: {
+        hwaddress: false, // code size b/112437884
+    },
 }
 
 // This module defines all of the defaults used to compiled llvm, except for
@@ -29,6 +32,7 @@ llvm_defaults {
         "-Wno-unused-parameter",
         "-Wno-maybe-uninitialized",
         "-Wno-missing-field-initializers",
+        "-Wno-implicit-fallthrough",
         "-Wwrite-strings",
         "-Werror",
         "-Dsprintf=sprintf",
