@@ -276,7 +276,8 @@ cc_library {
             export_include_dirs: ["device/include"],
         },
         android_arm: {
-            whole_static_libs: llvm_arm_static_libraries,
+            whole_static_libs: llvm_arm_static_libraries +
+                llvm_aarch64_static_libraries,
         },
         android_x86: {
             whole_static_libs: llvm_x86_static_libraries +
@@ -287,12 +288,6 @@ cc_library {
             whole_static_libs: llvm_x86_static_libraries +
                 llvm_arm_static_libraries +
                 llvm_aarch64_static_libraries,
-        },
-        android_mips: {
-            whole_static_libs: llvm_mips_static_libraries,
-        },
-        android_mips64: {
-            whole_static_libs: llvm_mips_static_libraries,
         },
         android_arm64: {
             whole_static_libs: llvm_aarch64_static_libraries +
