@@ -105,6 +105,7 @@ llvm_defaults {
 cc_library_headers {
     name: "llvm-headers-no-generated-headers",
     vendor_available: true,
+    product_available: true,
     host_supported: true,
     // TODO(b/153609531): remove when no longer needed.
     native_bridge_supported: true,
@@ -128,6 +129,7 @@ cc_library_headers {
 cc_library_headers {
     name: "llvm-headers",
     vendor_available: true,
+    product_available: true,
     host_supported: true,
     // TODO(b/153609531): remove when no longer needed.
     native_bridge_supported: true,
@@ -210,6 +212,7 @@ cc_library {
     host_supported: true,
     name: "libLLVM_android",
     vendor_available: true,
+    product_available: true,
     defaults: [
         "llvm-defaults",
         "force_build_llvm_components",
