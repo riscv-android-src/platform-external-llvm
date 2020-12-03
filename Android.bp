@@ -82,9 +82,7 @@ llvm_defaults {
             host_ldlibs: ["-luuid"],
         },
         linux_glibc: {
-            // Add on ncurses to have support for terminfo
             host_ldlibs: [
-                "-lncurses",
                 "-lgcc_s",
             ],
         },
@@ -92,11 +90,6 @@ llvm_defaults {
             cppflags: [
                 "-Wno-deprecated-declarations",
                 "-Woverloaded-virtual",
-            ],
-
-            // Add on ncurses to have support for terminfo
-            host_ldlibs: [
-                "-lncurses",
             ],
         },
     },
