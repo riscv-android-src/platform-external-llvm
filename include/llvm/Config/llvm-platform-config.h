@@ -115,7 +115,7 @@
 /* LLVM name for the native target MC init function, if available */
 #define LLVM_NATIVE_TARGETMC LLVMInitializeAArch64TargetMC
 
-#elif defined(__riscv)
+#elif defined(__riscv) && (__riscv_xlen == 64)
 
 /* LLVM architecture name for the native architecture, if available */
 //#define LLVM_NATIVE_ARCH Riscv64
